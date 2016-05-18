@@ -4,7 +4,8 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 #root_dir="$(readlink -f "$(dirname "$0")")/.."
 cd "$root_dir"
 dir=$(test -n "$1" && echo "$1" || echo "${HOME}/bitcoin")
-patch_file="$(pwd)/etc/bitcoin.patch"
+bitcore_patch="$(pwd)/etc/bitcoin.patch"
+scottcoin_patch="$(pwd)/etc/scottcoin.patch"
 
 cd "$dir" || exit 1
 
@@ -20,16 +21,18 @@ if test $? -ne 0; then
 fi
 git checkout -b "libbitcoind-$(date '+%Y.%m.%d')" || exit 1
 
-patch -p1 < "$patch_file" || exit 1
-
-git add --all || exit 1
-
 [ -n "$( git config user.name )" ] \
     || git config user.name 'Bitcore Build'
 
 [ -n "$( git config user.email )" ] \
     || git config user.email "$( id -n -u )@$( hostname -f )"
 
+patch -p1 < "$scottcoin_patch" || exit 1
+git add --all || exit 1
+git commit -a -m 'allow compiling of libbitcoind.so (scottcoin).' || exit 1
+
+patch -p1 < "$bitcore_patch" || exit 1
+git add --all || exit 1
 git commit -a -m 'allow compiling of libbitcoind.so.' || exit 1
 
 echo 'Patch completed successfully.'

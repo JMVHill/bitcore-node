@@ -1,0 +1,852 @@
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 2461f82..cb96965 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -153,7 +153,10 @@ BITCOIN_CORE_H = \
+   wallet/db.h \
+   wallet/wallet.h \
+   wallet/wallet_ismine.h \
+-  wallet/walletdb.h
++  wallet/walletdb.h \
++  keyio.h \
++  hexconversion.h \
++  signature.h
+ 
+ JSON_H = \
+   json/json_spirit.h \
+@@ -291,6 +294,8 @@ libbitcoin_util_a_SOURCES = \
+   utilmoneystr.cpp \
+   utilstrencodings.cpp \
+   utiltime.cpp \
++  keyio.cpp \
++  signature.cpp \
+   $(BITCOIN_CORE_H)
+ 
+ if GLIBC_BACK_COMPAT
+diff --git a/src/amount.h b/src/amount.h
+index 9212244..a808d90 100644
+--- a/src/amount.h
++++ b/src/amount.h
+@@ -34,7 +34,7 @@ public:
+     CFeeRate(const CFeeRate& other) { nSatoshisPerK = other.nSatoshisPerK; }
+ 
+     CAmount GetFee(size_t size) const; // unit returned is satoshis
+-    CAmount GetFeePerK() const { return GetFee(1000); } // satoshis-per-1000-bytes
++    CAmount GetFeePerK() const { return GetFee(0); } // satoshis-per-1000-bytes
+ 
+     friend bool operator<(const CFeeRate& a, const CFeeRate& b) { return a.nSatoshisPerK < b.nSatoshisPerK; }
+     friend bool operator>(const CFeeRate& a, const CFeeRate& b) { return a.nSatoshisPerK > b.nSatoshisPerK; }
+diff --git a/src/chain.h b/src/chain.h
+index 01be2d6..ae5b508 100644
+--- a/src/chain.h
++++ b/src/chain.h
+@@ -11,6 +11,7 @@
+ #include "pow.h"
+ #include "tinyformat.h"
+ #include "uint256.h"
++#include "utilstrencodings.h"
+ 
+ #include <vector>
+ 
+@@ -144,6 +145,7 @@ public:
+     unsigned int nTime;
+     unsigned int nBits;
+     unsigned int nNonce;
++    std::vector<unsigned char> signature;
+ 
+     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
+     uint32_t nSequenceId;
+@@ -184,6 +186,7 @@ public:
+         nTime          = block.nTime;
+         nBits          = block.nBits;
+         nNonce         = block.nNonce;
++        signature      = block.signature;
+     }
+ 
+     CDiskBlockPos GetBlockPos() const {
+@@ -214,6 +217,7 @@ public:
+         block.nTime          = nTime;
+         block.nBits          = nBits;
+         block.nNonce         = nNonce;
++        block.signature      = signature;
+         return block;
+     }
+ 
+@@ -245,10 +249,11 @@ public:
+ 
+     std::string ToString() const
+     {
+-        return strprintf("CBlockIndex(pprev=%p, nHeight=%d, merkle=%s, hashBlock=%s)",
++        return strprintf("CBlockIndex(pprev=%p, nHeight=%d, merkle=%s, hashBlock=%s, sig=%s)",
+             pprev, nHeight,
+             hashMerkleRoot.ToString(),
+-            GetBlockHash().ToString());
++            GetBlockHash().ToString(),
++            HexStr(signature).c_str());
+     }
+ 
+     //! Check whether this block index entry is valid up to the passed validity level.
+@@ -320,6 +325,14 @@ public:
+         READWRITE(nTime);
+         READWRITE(nBits);
+         READWRITE(nNonce);
++
++        bool serializingForDiskOrNetwork = (nType & (SER_DISK | SER_NETWORK));
++        if (serializingForDiskOrNetwork) {
++            assert((nType & SER_GETHASH) == 0
++                    && "Signature serialization code entered for block-hash calculation");
++
++            READWRITE(signature);
++        }
+     }
+ 
+     uint256 GetBlockHash() const
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index c715393..66bd095 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -16,6 +16,8 @@ using namespace std;
+ 
+ #include "chainparamsseeds.h"
+ 
++extern const uint256 scottcoinGenesisHash = uint256S("0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
++
+ /**
+  * Main network
+  */
+@@ -30,7 +32,7 @@ using namespace std;
+ class CMainParams : public CChainParams {
+ public:
+     CMainParams() {
+-        strNetworkID = "main";
++        strNetworkID = "scottnet";
+         consensus.nSubsidyHalvingInterval = 210000;
+         consensus.nMajorityEnforceBlockUpgrade = 750;
+         consensus.nMajorityRejectBlockOutdated = 950;
+@@ -38,7 +40,7 @@ public:
+         consensus.powLimit = uint256S("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+         consensus.nPowTargetSpacing = 10 * 60;
+-        consensus.fPowAllowMinDifficultyBlocks = false;
++        consensus.fPowAllowMinDifficultyBlocks = true;
+         /** 
+          * The message start string is designed to be unlikely to occur in normal data.
+          * The characters are rarely used upper ASCII, not valid as UTF-8, and produce
+@@ -49,7 +51,7 @@ public:
+         pchMessageStart[2] = 0xb4;
+         pchMessageStart[3] = 0xd9;
+         vAlertPubKey = ParseHex("04fc9702847840aaf195de8442ebecedf5b095cdbb9bc716bda9110971b28a49e0ead8564ff0db22209e0374782c093bb899692d524e9d6a6956e7c5ecbcd68284");
+-        nDefaultPort = 8333;
++        nDefaultPort = 8100;
+         nMinerThreads = 0;
+         nMaxTipAge = 24 * 60 * 60;
+         nPruneAfterHeight = 100000;
+@@ -81,51 +83,21 @@ public:
+         genesis.nNonce   = 2083236893;
+ 
+         consensus.hashGenesisBlock = genesis.GetHash();
+-        assert(consensus.hashGenesisBlock == uint256S("0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"));
++        assert(consensus.hashGenesisBlock == scottcoinGenesisHash);
+         assert(genesis.hashMerkleRoot == uint256S("0x4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"));
+ 
+-        vSeeds.push_back(CDNSSeedData("bitcoin.sipa.be", "seed.bitcoin.sipa.be")); // Pieter Wuille
+-        vSeeds.push_back(CDNSSeedData("bluematt.me", "dnsseed.bluematt.me")); // Matt Corallo
+-        vSeeds.push_back(CDNSSeedData("dashjr.org", "dnsseed.bitcoin.dashjr.org")); // Luke Dashjr
+-        vSeeds.push_back(CDNSSeedData("bitcoinstats.com", "seed.bitcoinstats.com")); // Christian Decker
+-        vSeeds.push_back(CDNSSeedData("xf2.org", "bitseed.xf2.org")); // Jeff Garzik
+-        vSeeds.push_back(CDNSSeedData("bitcoin.jonasschnelli.ch", "seed.bitcoin.jonasschnelli.ch")); // Jonas Schnelli
+-
+         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,0);
+         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,5);
+         base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,128);
+         base58Prefixes[EXT_PUBLIC_KEY] = boost::assign::list_of(0x04)(0x88)(0xB2)(0x1E).convert_to_container<std::vector<unsigned char> >();
+         base58Prefixes[EXT_SECRET_KEY] = boost::assign::list_of(0x04)(0x88)(0xAD)(0xE4).convert_to_container<std::vector<unsigned char> >();
+ 
+-        vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_main, pnSeed6_main + ARRAYLEN(pnSeed6_main));
+-
+         fRequireRPCPassword = true;
+         fMiningRequiresPeers = true;
+         fDefaultConsistencyChecks = false;
+         fRequireStandard = true;
+-        fMineBlocksOnDemand = false;
++        fMineBlocksOnDemand = true; // enable for `bitcoin-cli generate $N`
+         fTestnetToBeDeprecatedFieldRPC = false;
+-
+-        checkpointData = (Checkpoints::CCheckpointData) {
+-            boost::assign::map_list_of
+-            ( 11111, uint256S("0x0000000069e244f73d78e8fd29ba2fd2ed618bd6fa2ee92559f542fdb26e7c1d"))
+-            ( 33333, uint256S("0x000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6"))
+-            ( 74000, uint256S("0x0000000000573993a3c9e41ce34471c079dcf5f52a0e824a81e7f953b8661a20"))
+-            (105000, uint256S("0x00000000000291ce28027faea320c8d2b054b2e0fe44a773f3eefb151d6bdc97"))
+-            (134444, uint256S("0x00000000000005b12ffd4cd315cd34ffd4a594f430ac814c91184a0d42d2b0fe"))
+-            (168000, uint256S("0x000000000000099e61ea72015e79632f216fe6cb33d7899acb35b75c8303b763"))
+-            (193000, uint256S("0x000000000000059f452a5f7340de6682a977387c17010ff6e6c3bd83ca8b1317"))
+-            (210000, uint256S("0x000000000000048b95347e83192f69cf0366076336c639f9b7228e9ba171342e"))
+-            (216116, uint256S("0x00000000000001b4f4b433e81ee46494af945cf96014816a4e2370f11b23df4e"))
+-            (225430, uint256S("0x00000000000001c108384350f74090433e7fcf79a606b8e797f065b130575932"))
+-            (250000, uint256S("0x000000000000003887df1f29024b06fc2200b55f8af8f35453d7be294df2d214"))
+-            (279000, uint256S("0x0000000000000001ae8c72a0b0c301f67e3afca10e819efa9041e458e9bd7e40"))
+-            (295000, uint256S("0x00000000000000004d9b4ef50f0f9d686fd69db2e03af35a100370c64632a983")),
+-            1397080064, // * UNIX timestamp of last checkpoint block
+-            36544669,   // * total number of transactions between genesis and last checkpoint
+-                        //   (the tx=... number in the SetBestChain debug.log lines)
+-            60000.0     // * estimated number of transactions per day after checkpoint
+-        };
+     }
+ };
+ static CMainParams mainParams;
+diff --git a/src/consensus/consensus.h b/src/consensus/consensus.h
+index fc2d01f..e6703cc 100644
+--- a/src/consensus/consensus.h
++++ b/src/consensus/consensus.h
+@@ -11,7 +11,7 @@ static const unsigned int MAX_BLOCK_SIZE = 1000000;
+ /** The maximum allowed number of signature check operations in a block (network rule) */
+ static const unsigned int MAX_BLOCK_SIGOPS = MAX_BLOCK_SIZE/50;
+ /** Coinbase transaction outputs can only be spent after this number of new blocks (network rule) */
+-static const int COINBASE_MATURITY = 100;
++static const int COINBASE_MATURITY = 1;
+ 
+ /** Flags for LockTime() */
+ enum {
+diff --git a/src/init.cpp b/src/init.cpp
+index a04e4e0..b806c0f 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -30,6 +30,7 @@
+ #include "wallet/wallet.h"
+ #include "wallet/walletdb.h"
+ #endif
++#include "keyio.h"
+ 
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -901,6 +902,16 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
+         return InitError(strprintf(_("Cannot obtain a lock on data directory %s. Bitcoin Core is probably already running.") + " %s.", strDataDir, e.what()));
+     }
+ 
++    // Check that a public key was provided - needed in order to bootup in scottnet mode
++    if (GetEcdsaPubKeyHex().empty()) {
++        return InitError(_("Public key file ecdsa.pub was not detected. File should exist within the datadir."));
++    }
++
++    // Check if private key was provided
++    if (GetEcdsaPrivKeyHex().empty()) {
++        std::cout << "No private key found. Server is starting in relay mode. Blocks cannot be mined in this mode.\n";
++    }
++
+ #ifndef WIN32
+     CreatePidFile(GetPidFile(), getpid());
+ #endif
+@@ -1167,17 +1178,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
+                     strLoadError = _("You need to rebuild the database using -reindex to go back to unpruned mode.  This will redownload the entire blockchain");
+                     break;
+                 }
+-
+-                uiInterface.InitMessage(_("Verifying blocks..."));
+-                if (fHavePruned && GetArg("-checkblocks", 288) > MIN_BLOCKS_TO_KEEP) {
+-                    LogPrintf("Prune: pruned datadir may not have more than %d blocks; -checkblocks=%d may fail\n",
+-                        MIN_BLOCKS_TO_KEEP, GetArg("-checkblocks", 288));
+-                }
+-                if (!CVerifyDB().VerifyDB(pcoinsdbview, GetArg("-checklevel", 3),
+-                              GetArg("-checkblocks", 288))) {
+-                    strLoadError = _("Corrupted block database detected");
+-                    break;
+-                }
+             } catch (const std::exception& e) {
+                 if (fDebug) LogPrintf("%s\n", e.what());
+                 strLoadError = _("Error opening block database");
+diff --git a/src/keyio.cpp b/src/keyio.cpp
+new file mode 100644
+index 0000000..bfbc943
+--- /dev/null
++++ b/src/keyio.cpp
+@@ -0,0 +1,50 @@
++#include <cstdio>
++#include "keyio.h"
++#include "util.h"
++
++static std::string DataDirFileContents(const char *filename)
++{
++    // attempt to load from datadir
++    boost::filesystem::path privateKeyPath = GetDataDir() / filename;
++
++    FILE *file = fopen(privateKeyPath.string().c_str(), "r");
++    if(!file){
++        std::cerr << "couldn't open " << privateKeyPath << ": " << strerror(errno) << "\n";
++        return "";
++    }
++
++    char *line = NULL;
++    size_t linelength = 0;
++    ssize_t n = getline(&line, &linelength, file);
++
++    if(n < 0){
++        std::cerr << "couldn't read " << privateKeyPath << ": " << strerror(errno) << "\n";
++        fclose(file);
++        free(line);
++        return "";
++    }
++
++    if(fclose(file) != 0){
++        std::cerr << "warning: error closing " << privateKeyPath << ": " << strerror(errno) << "\n";
++        // continue anyway
++    }
++
++    std::string builtString = line;
++    free(line);
++
++    return builtString;
++}
++
++std::string GetEcdsaPrivKeyHex()
++{
++    const char *environmentPrivateKey = std::getenv("SCOTT_PRIV_KEY");
++    if (environmentPrivateKey)
++        return environmentPrivateKey;
++
++    return DataDirFileContents("ecdsa.priv");
++}
++
++std::string GetEcdsaPubKeyHex()
++{
++    return DataDirFileContents("ecdsa.pub");
++}
+diff --git a/src/keyio.h b/src/keyio.h
+new file mode 100644
+index 0000000..01ed633
+--- /dev/null
++++ b/src/keyio.h
+@@ -0,0 +1,9 @@
++#ifndef BITCOIN_KEYIO_H
++#define BITCOIN_KEYIO_H
++
++#include <string>
++
++std::string GetEcdsaPubKeyHex();
++std::string GetEcdsaPrivKeyHex();
++
++#endif
+diff --git a/src/main.cpp b/src/main.cpp
+index fe072ec..7dcc24a 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -23,6 +23,7 @@
+ #include "util.h"
+ #include "utilmoneystr.h"
+ #include "validationinterface.h"
++#include "signature.h"
+ 
+ #include <sstream>
+ 
+@@ -1048,40 +1049,6 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
+                                       hash.ToString(), nFees, txMinFee),
+                              REJECT_INSUFFICIENTFEE, "insufficient fee");
+ 
+-        // Require that free transactions have sufficient priority to be mined in the next block.
+-        if (GetBoolArg("-relaypriority", true) && nFees < ::minRelayTxFee.GetFee(nSize) && !AllowFree(view.GetPriority(tx, chainActive.Height() + 1))) {
+-            return state.DoS(0, false, REJECT_INSUFFICIENTFEE, "insufficient priority");
+-        }
+-
+-        // Continuously rate-limit free (really, very-low-fee) transactions
+-        // This mitigates 'penny-flooding' -- sending thousands of free transactions just to
+-        // be annoying or make others' transactions take longer to confirm.
+-        if (fLimitFree && nFees < ::minRelayTxFee.GetFee(nSize))
+-        {
+-            static CCriticalSection csFreeLimiter;
+-            static double dFreeCount;
+-            static int64_t nLastTime;
+-            int64_t nNow = GetTime();
+-
+-            LOCK(csFreeLimiter);
+-
+-            // Use an exponentially decaying ~10-minute window:
+-            dFreeCount *= pow(1.0 - 1.0/600.0, (double)(nNow - nLastTime));
+-            nLastTime = nNow;
+-            // -limitfreerelay unit is thousand-bytes-per-minute
+-            // At default rate it would take over a month to fill 1GB
+-            if (dFreeCount >= GetArg("-limitfreerelay", 15)*10*1000)
+-                return state.DoS(0, error("AcceptToMemoryPool: free transaction rejected by rate limiter"),
+-                                 REJECT_INSUFFICIENTFEE, "rate limited free transaction");
+-            LogPrint("mempool", "Rate limit dFreeCount: %g => %g\n", dFreeCount, dFreeCount+nSize);
+-            dFreeCount += nSize;
+-        }
+-
+-        if (fRejectAbsurdFee && nFees > ::minRelayTxFee.GetFee(nSize) * 10000)
+-            return error("AcceptToMemoryPool: absurdly high fees %s, %d > %d",
+-                         hash.ToString(),
+-                         nFees, ::minRelayTxFee.GetFee(nSize) * 10000);
+-
+         // Check against previous transactions
+         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
+         if (!CheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS, true))
+@@ -1221,10 +1188,6 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos)
+         return error("%s: Deserialize or I/O error - %s at %s", __func__, e.what(), pos.ToString());
+     }
+ 
+-    // Check the header
+-    if (!CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus()))
+-        return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
+-
+     return true;
+ }
+ 
+@@ -1240,15 +1203,7 @@ bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex)
+ 
+ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
+ {
+-    int halvings = nHeight / consensusParams.nSubsidyHalvingInterval;
+-    // Force block reward to zero when right shift is undefined.
+-    if (halvings >= 64)
+-        return 0;
+-
+-    CAmount nSubsidy = 50 * COIN;
+-    // Subsidy is cut in half every 210,000 blocks which will occur approximately every 4 years.
+-    nSubsidy >>= halvings;
+-    return nSubsidy;
++    return 1 * COIN;
+ }
+ 
+ bool IsInitialBlockDownload()
+@@ -1828,7 +1783,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
+     const CChainParams& chainparams = Params();
+     AssertLockHeld(cs_main);
+     // Check it again in case a previous version let a bad block in
+-    if (!CheckBlock(block, state, !fJustCheck, !fJustCheck))
++    if (!CheckBlock(block, state, false, !fJustCheck))
+         return false;
+ 
+     // verify that the view's current state corresponds to the previous block
+@@ -2705,7 +2660,7 @@ bool FindUndoPos(CValidationState &state, int nFile, CDiskBlockPos &pos, unsigne
+ bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state, bool fCheckPOW)
+ {
+     // Check proof of work matches claimed amount
+-    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus()))
++    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.signature))
+         return state.DoS(50, error("CheckBlockHeader(): proof of work failed"),
+                          REJECT_INVALID, "high-hash");
+ 
+@@ -2789,11 +2744,6 @@ bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& sta
+ 
+     int nHeight = pindexPrev->nHeight+1;
+ 
+-    // Check proof of work
+-    if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
+-        return state.DoS(100, error("%s: incorrect proof of work", __func__),
+-                         REJECT_INVALID, "bad-diffbits");
+-
+     // Check timestamp against prev
+     if (block.GetBlockTime() <= pindexPrev->GetMedianTimePast())
+         return state.Invalid(error("%s: block's timestamp is too early", __func__),
+@@ -2860,7 +2810,7 @@ bool ContextualCheckBlock(const CBlock& block, CValidationState& state, CBlockIn
+     return true;
+ }
+ 
+-bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex** ppindex)
++bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex** ppindex, bool fCheckPOW)
+ {
+     const CChainParams& chainparams = Params();
+     AssertLockHeld(cs_main);
+@@ -2878,7 +2828,7 @@ bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBloc
+         return true;
+     }
+ 
+-    if (!CheckBlockHeader(block, state))
++    if (!CheckBlockHeader(block, state, fCheckPOW))
+         return false;
+ 
+     // Get prev block index
+@@ -2911,7 +2861,7 @@ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex** ppindex,
+ 
+     CBlockIndex *&pindex = *ppindex;
+ 
+-    if (!AcceptBlockHeader(block, state, &pindex))
++    if (!AcceptBlockHeader(block, state, &pindex, false))
+         return false;
+ 
+     // Try to process all requested blocks that we don't have, but only
+@@ -2935,7 +2885,7 @@ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex** ppindex,
+         if (fTooFarAhead) return true;      // Block height is too high
+     }
+ 
+-    if ((!CheckBlock(block, state)) || !ContextualCheckBlock(block, state, pindex->pprev)) {
++    if ((!CheckBlock(block, state, false)) || !ContextualCheckBlock(block, state, pindex->pprev)) {
+         if (state.IsInvalid() && !state.CorruptionPossible()) {
+             pindex->nStatus |= BLOCK_FAILED_VALID;
+             setDirtyBlockIndex.insert(pindex);
+@@ -2984,7 +2934,7 @@ static bool IsSuperMajority(int minVersion, const CBlockIndex* pstart, unsigned
+ bool ProcessNewBlock(CValidationState &state, CNode* pfrom, CBlock* pblock, bool fForceProcessing, CDiskBlockPos *dbp)
+ {
+     // Preliminary checks
+-    bool checked = CheckBlock(*pblock, state);
++    bool checked = CheckBlock(*pblock, state, false);
+ 
+     {
+         LOCK(cs_main);
+@@ -4543,6 +4493,12 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv,
+             return true;
+         }
+ 
++        // Verify last signature of passed header chain
++        assert(!headers.empty());
++        CBlockHeader &lastHeader = headers.back();
++        if(!VerifySignature(lastHeader.GetHash(), lastHeader.signature))
++            return error("invalid header signature received");
++
+         CBlockIndex *pindexLast = NULL;
+         BOOST_FOREACH(const CBlockHeader& header, headers) {
+             CValidationState state;
+@@ -4550,7 +4506,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv,
+                 Misbehaving(pfrom->GetId(), 20);
+                 return error("non-continuous headers sequence");
+             }
+-            if (!AcceptBlockHeader(header, state, &pindexLast)) {
++            if (!AcceptBlockHeader(header, state, &pindexLast, false)) {
+                 int nDoS;
+                 if (state.IsInvalid(nDoS)) {
+                     if (nDoS > 0)
+diff --git a/src/main.h b/src/main.h
+index 74911f6..495f220 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -408,7 +408,7 @@ bool TestBlockValidity(CValidationState &state, const CBlock& block, CBlockIndex
+ 
+ /** Store block on disk. If dbp is non-NULL, the file is known to already reside on disk */
+ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex **pindex, bool fRequested, CDiskBlockPos* dbp);
+-bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex **ppindex= NULL);
++bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex **ppindex= NULL, bool fCheckPOW = true);
+ 
+ 
+ 
+diff --git a/src/miner.cpp b/src/miner.cpp
+index 5972f74..d77bdee 100644
+--- a/src/miner.cpp
++++ b/src/miner.cpp
+@@ -20,6 +20,7 @@
+ #ifdef ENABLE_WALLET
+ #include "wallet/wallet.h"
+ #endif
++#include "signature.h"
+ 
+ #include <boost/thread.hpp>
+ #include <boost/tuple/tuple.hpp>
+@@ -255,24 +256,6 @@ CBlockTemplate* CreateNewBlock(const CScript& scriptPubKeyIn)
+             if (nBlockSigOps + nTxSigOps >= MAX_BLOCK_SIGOPS)
+                 continue;
+ 
+-            // Skip free transactions if we're past the minimum block size:
+-            const uint256& hash = tx.GetHash();
+-            double dPriorityDelta = 0;
+-            CAmount nFeeDelta = 0;
+-            mempool.ApplyDeltas(hash, dPriorityDelta, nFeeDelta);
+-            if (fSortedByFee && (dPriorityDelta <= 0) && (nFeeDelta <= 0) && (feeRate < ::minRelayTxFee) && (nBlockSize + nTxSize >= nBlockMinSize))
+-                continue;
+-
+-            // Prioritise by fee once past the priority size or we run out of high-priority
+-            // transactions:
+-            if (!fSortedByFee &&
+-                ((nBlockSize + nTxSize >= nBlockPrioritySize) || !AllowFree(dPriority)))
+-            {
+-                fSortedByFee = true;
+-                comparer = TxPriorityCompare(fSortedByFee);
+-                std::make_heap(vecPriority.begin(), vecPriority.end(), comparer);
+-            }
+-
+             if (!view.HaveInputs(tx))
+                 continue;
+ 
+@@ -307,6 +290,7 @@ CBlockTemplate* CreateNewBlock(const CScript& scriptPubKeyIn)
+             }
+ 
+             // Add transactions that depend on this one to the priority queue
++            const uint256& hash = tx.GetHash();
+             if (mapDependers.count(hash))
+             {
+                 BOOST_FOREACH(COrphan* porphan, mapDependers[hash])
+@@ -515,6 +499,8 @@ void static BitcoinMiner(CWallet *pwallet)
+                         ProcessBlockFound(pblock, *pwallet, reservekey);
+                         SetThreadPriority(THREAD_PRIORITY_LOWEST);
+ 
++                        SignHash(pblock->GetHash(), pblock->signature);
++
+                         // In regression test mode, stop mining after a block is found.
+                         if (chainparams.MineBlocksOnDemand())
+                             throw boost::thread_interrupted();
+diff --git a/src/pow.cpp b/src/pow.cpp
+index bb53ad2..328bb26 100644
+--- a/src/pow.cpp
++++ b/src/pow.cpp
+@@ -10,6 +10,7 @@
+ #include "primitives/block.h"
+ #include "uint256.h"
+ #include "util.h"
++#include "signature.h"
+ 
+ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params)
+ {
+@@ -81,23 +82,12 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
+     return bnNew.GetCompact();
+ }
+ 
+-bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params& params)
++bool CheckProofOfWork(uint256 hash, const std::vector<unsigned char> &signature)
+ {
+-    bool fNegative;
+-    bool fOverflow;
+-    arith_uint256 bnTarget;
+-
+-    bnTarget.SetCompact(nBits, &fNegative, &fOverflow);
+-
+-    // Check range
+-    if (fNegative || bnTarget == 0 || fOverflow || bnTarget > UintToArith256(params.powLimit))
+-        return error("CheckProofOfWork(): nBits below minimum work");
+-
+-    // Check proof of work matches claimed amount
+-    if (UintToArith256(hash) > bnTarget)
+-        return error("CheckProofOfWork(): hash doesn't match nBits");
++    // we don't sign the genesis block, so we don't check its signature
++    extern const uint256 scottcoinGenesisHash;
+ 
+-    return true;
++    return hash == scottcoinGenesisHash || VerifySignature(hash, signature);
+ }
+ 
+ arith_uint256 GetBlockProof(const CBlockIndex& block)
+diff --git a/src/pow.h b/src/pow.h
+index e864a47..ea190e8 100644
+--- a/src/pow.h
++++ b/src/pow.h
+@@ -19,7 +19,7 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
+ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params&);
+ 
+ /** Check whether a block hash satisfies the proof-of-work requirement specified by nBits */
+-bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params&);
++bool CheckProofOfWork(uint256 hash, const std::vector<unsigned char> &signature);
+ arith_uint256 GetBlockProof(const CBlockIndex& block);
+ 
+ /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */
+diff --git a/src/primitives/block.cpp b/src/primitives/block.cpp
+index 5b9c13d..1f6ca5d 100644
+--- a/src/primitives/block.cpp
++++ b/src/primitives/block.cpp
+@@ -112,13 +112,14 @@ uint256 CBlock::CheckMerkleBranch(uint256 hash, const std::vector<uint256>& vMer
+ std::string CBlock::ToString() const
+ {
+     std::stringstream s;
+-    s << strprintf("CBlock(hash=%s, ver=%d, hashPrevBlock=%s, hashMerkleRoot=%s, nTime=%u, nBits=%08x, nNonce=%u, vtx=%u)\n",
++    s << strprintf("CBlock(hash=%s, ver=%d, hashPrevBlock=%s, hashMerkleRoot=%s, nTime=%u, nBits=%08x, nNonce=%u, vtx=%u, sig=%s)\n",
+         GetHash().ToString(),
+         nVersion,
+         hashPrevBlock.ToString(),
+         hashMerkleRoot.ToString(),
+         nTime, nBits, nNonce,
+-        vtx.size());
++        vtx.size(),
++        HexStr(signature).c_str());
+     for (unsigned int i = 0; i < vtx.size(); i++)
+     {
+         s << "  " << vtx[i].ToString() << "\n";
+diff --git a/src/primitives/block.h b/src/primitives/block.h
+index 90b8904..c069ae5 100644
+--- a/src/primitives/block.h
++++ b/src/primitives/block.h
+@@ -28,6 +28,7 @@ public:
+     uint32_t nTime;
+     uint32_t nBits;
+     uint32_t nNonce;
++    std::vector<unsigned char> signature;
+ 
+     CBlockHeader()
+     {
+@@ -45,6 +46,14 @@ public:
+         READWRITE(nTime);
+         READWRITE(nBits);
+         READWRITE(nNonce);
++
++        bool serializingForDiskOrNetwork = (nType & (SER_DISK | SER_NETWORK));
++        if (serializingForDiskOrNetwork) {
++            assert((nType & SER_GETHASH) == 0
++                    && "Signature serialization code entered for block-hash calculation");
++
++            READWRITE(signature);
++        }
+     }
+ 
+     void SetNull()
+@@ -115,6 +124,7 @@ public:
+         block.nTime          = nTime;
+         block.nBits          = nBits;
+         block.nNonce         = nNonce;
++        block.signature      = signature;
+         return block;
+     }
+ 
+diff --git a/src/rpcblockchain.cpp b/src/rpcblockchain.cpp
+index 1bab3b6..920877a 100644
+--- a/src/rpcblockchain.cpp
++++ b/src/rpcblockchain.cpp
+@@ -90,6 +90,10 @@ Object blockToJSON(const CBlock& block, const CBlockIndex* blockindex, bool txDe
+     CBlockIndex *pnext = chainActive.Next(blockindex);
+     if (pnext)
+         result.push_back(Pair("nextblockhash", pnext->GetBlockHash().GetHex()));
++
++    // include the block's signature in the JSON output as it is part of the block
++    result.push_back(Pair("signature", HexStr(blockindex->signature)));
++
+     return result;
+ }
+ 
+diff --git a/src/rpcmining.cpp b/src/rpcmining.cpp
+index 98133b0..97e2568 100644
+--- a/src/rpcmining.cpp
++++ b/src/rpcmining.cpp
+@@ -19,6 +19,7 @@
+ #ifdef ENABLE_WALLET
+ #include "wallet/wallet.h"
+ #endif
++#include "signature.h"
+ 
+ #include <stdint.h>
+ 
+@@ -159,11 +160,7 @@ Value generate(const Array& params, bool fHelp)
+             LOCK(cs_main);
+             IncrementExtraNonce(pblock, chainActive.Tip(), nExtraNonce);
+         }
+-        while (!CheckProofOfWork(pblock->GetHash(), pblock->nBits, Params().GetConsensus())) {
+-            // Yes, there is a chance every nonce could fail to satisfy the -regtest
+-            // target -- 1 in 2^(2^32). That ain't gonna happen.
+-            ++pblock->nNonce;
+-        }
++        SignHash(pblock->GetHash(), pblock->signature);
+         CValidationState state;
+         if (!ProcessNewBlock(state, NULL, pblock, true, NULL))
+             throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
+diff --git a/src/signature.cpp b/src/signature.cpp
+new file mode 100644
+index 0000000..05df18a
+--- /dev/null
++++ b/src/signature.cpp
+@@ -0,0 +1,48 @@
++#include "support/allocators/secure.h"
++#include "key.h"
++
++#include "signature.h"
++#include "keyio.h"
++#include "utilstrencodings.h"
++
++static void VectorToPrivKey(const std::vector<unsigned char> &privKeyVector, CPrivKey &privKey)
++{
++    for(std::vector<unsigned char>::const_iterator it = privKeyVector.begin(),
++            end = privKeyVector.end();
++            it != end;
++            ++it)
++    {
++        privKey.push_back(*it);
++    }
++}
++
++void SignHash(const uint256 &hash, std::vector<unsigned char> &signature)
++{
++    // CPrivKey is just a vector<..., secure_allocator<>>
++    CPrivKey byteVector;
++    VectorToPrivKey(ParseHex(GetEcdsaPrivKeyHex().c_str()), byteVector);
++
++    CKey privKey = CKey();
++
++    bool isAssigned = privKey.SetPrivKey(byteVector, false);
++    if(!isAssigned){
++        std::cerr << "Sign error: Couldn't assign private key\n";
++        exit(1);
++    }
++
++    bool isSigned = privKey.Sign(hash, signature);
++    if(!isSigned){
++        std::cerr << "Sign error: couldn't sign uint256\n";
++        exit(1);
++    }
++}
++
++bool VerifySignature(const uint256 &hash, const std::vector<unsigned char> &signature)
++{
++    CPrivKey pubKeySource;
++    VectorToPrivKey(ParseHex(GetEcdsaPubKeyHex().c_str()), pubKeySource);
++
++    CPubKey pubKey = CPubKey(pubKeySource.begin(), pubKeySource.end());
++
++    return pubKey.Verify(hash, signature);
++}
+diff --git a/src/signature.h b/src/signature.h
+new file mode 100644
+index 0000000..95c9bdd
+--- /dev/null
++++ b/src/signature.h
+@@ -0,0 +1,9 @@
++#ifndef SIGNATURE_H
++#define SIGNATURE_H
++
++#include "uint256.h"
++
++void SignHash(const uint256 &, std::vector<unsigned char> &);
++bool VerifySignature(const uint256 &, const std::vector<unsigned char> &);
++
++#endif
+diff --git a/src/txdb.cpp b/src/txdb.cpp
+index df9ff8d..ca4627c 100644
+--- a/src/txdb.cpp
++++ b/src/txdb.cpp
+@@ -224,9 +224,17 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
+                 pindexNew->nNonce         = diskindex.nNonce;
+                 pindexNew->nStatus        = diskindex.nStatus;
+                 pindexNew->nTx            = diskindex.nTx;
+-
+-                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, Params().GetConsensus()))
+-                    return error("LoadBlockIndex(): CheckProofOfWork failed: %s", pindexNew->ToString());
++                pindexNew->signature      = diskindex.signature;
++
++                /* No check on proof of work when loading from disk - this is
++                 * to allow rotation of keys.
++                 *
++                 * We deem this to be safe, and that the disk is trustworthy,
++                 * as if someone was able to compromise the file system of the
++                 * primary node to be able to write to the disk/block database,
++                 * then it's reasonable to assume they'd also have access to
++                 * the private key file anyway.
++                 */
+ 
+                 pcursor->Next();
+             } else {
+diff --git a/src/wallet/wallet.cpp b/src/wallet/wallet.cpp
+index f412e47..de017eb 100644
+--- a/src/wallet/wallet.cpp
++++ b/src/wallet/wallet.cpp
+@@ -1878,7 +1878,6 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend,
+                     // add the dust to the fee.
+                     if (newTxOut.IsDust(::minRelayTxFee))
+                     {
+-                        nFeeRet += nChange;
+                         reservekey.ReturnKey();
+                     }
+                     else
+@@ -1935,22 +1934,7 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend,
+                         break;
+                 }
+ 
+-                CAmount nFeeNeeded = GetMinimumFee(nBytes, nTxConfirmTarget, mempool);
+-
+-                // If we made it here and we aren't even able to meet the relay fee on the next pass, give up
+-                // because we must be at the maximum allowed fee.
+-                if (nFeeNeeded < ::minRelayTxFee.GetFee(nBytes))
+-                {
+-                    strFailReason = _("Transaction too large for fee policy");
+-                    return false;
+-                }
+-
+-                if (nFeeRet >= nFeeNeeded)
+-                    break; // Done, enough fee included.
+-
+-                // Include more fee and try again.
+-                nFeeRet = nFeeNeeded;
+-                continue;
++                break; // Done, enough fee included. -- no fee in scottnet so break
+             }
+         }
+     }
