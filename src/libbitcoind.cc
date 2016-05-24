@@ -6,6 +6,7 @@
  *   A bitcoind node.js binding.
  */
 
+#include <cstdio>
 #include "libbitcoind.h"
 
 using namespace std;
@@ -126,6 +127,8 @@ static boost::thread_group threadGroup;
  * Used for async functions and necessary linked lists at points.
  */
 
+#define LOG_FN() fprintf(stderr, "[+] in %s\n", __func__)
+
 struct async_tip_update_data {
   uv_work_t req;
   size_t result;
@@ -211,6 +214,7 @@ set_cooked(void);
  * provides a float value >= indicating the progress of the blockchain sync
  */
 NAN_METHOD(SyncPercentage) {
+LOG_FN();
   const CChainParams& chainParams = Params();
   float progress = 0;
   progress = Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), chainActive.Tip());
@@ -218,11 +222,13 @@ NAN_METHOD(SyncPercentage) {
 };
 
 NAN_METHOD(GetBestBlockHash) {
+LOG_FN();
   LOCK(cs_main);
   info.GetReturnValue().Set(New(chainActive.Tip()->GetBlockHash().GetHex()).ToLocalChecked());
 }
 
 NAN_METHOD(GetNextBlockHash) {
+LOG_FN();
 
   if (info.Length() < 1 || !info[0]->IsString()) {
     return ThrowError("Usage: bitcoind.getNextBlockHash(blockhash)");
@@ -250,11 +256,13 @@ NAN_METHOD(GetNextBlockHash) {
  * returns a boolean of bitcoin is fully synced
  */
 NAN_METHOD(IsSynced) {
+LOG_FN();
   bool isDownloading = IsInitialBlockDownload();
   info.GetReturnValue().Set(New(!isDownloading));
 };
 
 NAN_METHOD(StartTxMon) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   Local<Function> callback = Local<Function>::Cast(info[0]);
   Eternal<Function> cb(isolate, callback);
@@ -270,6 +278,7 @@ NAN_METHOD(StartTxMon) {
 };
 
 NAN_METHOD(StartTxMonLeave) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   Local<Function> callback = Local<Function>::Cast(info[0]);
   Eternal<Function> cb(isolate, callback);
@@ -286,6 +295,7 @@ NAN_METHOD(StartTxMonLeave) {
 
 static void
 tx_notifier(uv_async_t *handle) {
+LOG_FN();
   Isolate* isolate = Isolate::GetCurrent();
   HandleScope scope(isolate);
 
@@ -326,6 +336,7 @@ tx_notifier(uv_async_t *handle) {
 }
 static bool
 queueTx(const CTransaction& tx) {
+LOG_FN();
   LOCK(cs_main);
   txQueue.push_back(tx);
   uv_async_send(&txmon_async);
@@ -334,6 +345,7 @@ queueTx(const CTransaction& tx) {
 
 static void
 txleave_notifier(uv_async_t *handle) {
+LOG_FN();
   Isolate* isolate = Isolate::GetCurrent();
   HandleScope scope(isolate);
 
@@ -373,6 +385,7 @@ txleave_notifier(uv_async_t *handle) {
 }
 static bool
 queueTxLeave(const CTransaction& tx) {
+LOG_FN();
   LOCK(cs_main);
   txQueueLeave.push_back(tx);
   uv_async_send(&txmonleave_async);
@@ -384,6 +397,7 @@ queueTxLeave(const CTransaction& tx) {
  */
 
 NAN_METHOD(OnTipUpdate) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   HandleScope scope(isolate);
 
@@ -405,6 +419,7 @@ NAN_METHOD(OnTipUpdate) {
 
 static void
 async_tip_update(uv_work_t *req) {
+LOG_FN();
   async_tip_update_data *data = reinterpret_cast<async_tip_update_data*>(req->data);
 
   size_t lastHeight = chainActive.Height();
@@ -419,6 +434,7 @@ async_tip_update(uv_work_t *req) {
 
 static void
 async_tip_update_after(uv_work_t *r) {
+LOG_FN();
   async_tip_update_data *req = reinterpret_cast<async_tip_update_data*>(r->data);
   Isolate* isolate = req->isolate;
   HandleScope scope(isolate);
@@ -442,6 +458,7 @@ async_tip_update_after(uv_work_t *r) {
 }
 
 NAN_METHOD(OnBlocksReady) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   HandleScope scope(isolate);
 
@@ -470,6 +487,7 @@ NAN_METHOD(OnBlocksReady) {
 
 static void
 async_blocks_ready(uv_work_t *req) {
+LOG_FN();
   async_block_ready_data *data = reinterpret_cast<async_block_ready_data*>(req->data);
   data->result = std::string("");
 
@@ -510,6 +528,7 @@ async_blocks_ready(uv_work_t *req) {
 
 static void
 async_blocks_ready_after(uv_work_t *r) {
+LOG_FN();
   async_block_ready_data* req = reinterpret_cast<async_block_ready_data*>(r->data);
   Isolate* isolate = req->isolate;
   HandleScope scope(isolate);
@@ -542,6 +561,7 @@ async_blocks_ready_after(uv_work_t *r) {
  * Start the bitcoind node with AppInit2() on a separate thread.
  */
 NAN_METHOD(StartBitcoind) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   HandleScope scope(isolate);
 
@@ -618,6 +638,7 @@ NAN_METHOD(StartBitcoind) {
 
 static void
 async_start_node(uv_work_t *req) {
+LOG_FN();
   async_node_data *data = reinterpret_cast<async_node_data*>(req->data);
   if (data->datadir != "") {
     g_data_dir = (char *)data->datadir.c_str();
@@ -641,6 +662,7 @@ async_start_node(uv_work_t *req) {
 
 static void
 async_start_node_after(uv_work_t *r) {
+LOG_FN();
   async_node_data *req = reinterpret_cast<async_node_data*>(r->data);
   Isolate* isolate = req->isolate;
   HandleScope scope(isolate);
@@ -677,6 +699,7 @@ async_start_node_after(uv_work_t *r) {
 
 static int
 start_node(void) {
+LOG_FN();
   SetupEnvironment();
 
   noui_connect();
@@ -687,6 +710,7 @@ start_node(void) {
 
 static void
 start_node_thread(void) {
+LOG_FN();
   CScheduler scheduler;
 
   // Workaround for AppInit2() arg parsing. Not ideal, but it works.
@@ -799,6 +823,7 @@ start_node_thread(void) {
  */
 
 NAN_METHOD(StopBitcoind) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   HandleScope scope(isolate);
 
@@ -837,6 +862,7 @@ NAN_METHOD(StopBitcoind) {
 
 static void
 async_stop_node(uv_work_t *req) {
+LOG_FN();
   async_node_data *data = reinterpret_cast<async_node_data*>(req->data);
 
   StartShutdown();
@@ -854,6 +880,7 @@ async_stop_node(uv_work_t *req) {
 
 static void
 async_stop_node_after(uv_work_t *r) {
+LOG_FN();
   async_node_data* req = reinterpret_cast<async_node_data*>(r->data);
   Isolate* isolate = req->isolate;
   HandleScope scope(isolate);
@@ -886,6 +913,7 @@ async_stop_node_after(uv_work_t *r) {
  */
 
 NAN_METHOD(GetBlock) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   HandleScope scope(isolate);
   if (info.Length() < 2
@@ -924,6 +952,7 @@ NAN_METHOD(GetBlock) {
 
 static void
 async_get_block(uv_work_t *req) {
+LOG_FN();
   async_block_data* data = reinterpret_cast<async_block_data*>(req->data);
 
   CBlockIndex* pblockindex;
@@ -978,6 +1007,7 @@ async_get_block(uv_work_t *req) {
 
 static void
 async_get_block_after(uv_work_t *r) {
+LOG_FN();
   async_block_data* req = reinterpret_cast<async_block_data*>(r->data);
   Isolate *isolate = req->isolate;
   HandleScope scope(isolate);
@@ -1014,6 +1044,7 @@ async_get_block_after(uv_work_t *r) {
  */
 
 NAN_METHOD(GetTransaction) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   HandleScope scope(isolate);
   if (info.Length() < 3
@@ -1049,6 +1080,7 @@ NAN_METHOD(GetTransaction) {
 
 static void
 async_get_tx(uv_work_t *req) {
+LOG_FN();
   async_tx_data* data = reinterpret_cast<async_tx_data*>(req->data);
 
   uint256 blockhash;
@@ -1093,6 +1125,7 @@ async_get_tx(uv_work_t *req) {
 
 static void
 async_get_tx_after(uv_work_t *r) {
+LOG_FN();
   async_tx_data* req = reinterpret_cast<async_tx_data*>(r->data);
   Isolate* isolate = req->isolate;
   HandleScope scope(isolate);
@@ -1142,6 +1175,7 @@ async_get_tx_after(uv_work_t *r) {
  */
 
 NAN_METHOD(GetTransactionWithBlockInfo) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   HandleScope scope(isolate);
   if (info.Length() < 3
@@ -1180,6 +1214,7 @@ NAN_METHOD(GetTransactionWithBlockInfo) {
 
 static void
 async_get_tx_and_info(uv_work_t *req) {
+LOG_FN();
   async_tx_data* data = reinterpret_cast<async_tx_data*>(req->data);
 
   uint256 hash = uint256S(data->txid);
@@ -1243,6 +1278,7 @@ async_get_tx_and_info(uv_work_t *req) {
 
 static void
 async_get_tx_and_info_after(uv_work_t *r) {
+LOG_FN();
   async_tx_data* req = reinterpret_cast<async_tx_data*>(r->data);
   Isolate* isolate = req->isolate;
   HandleScope scope(isolate);
@@ -1286,6 +1322,7 @@ async_get_tx_and_info_after(uv_work_t *r) {
  * Determine if an outpoint is spent
  */
 NAN_METHOD(IsSpent) {
+LOG_FN();
   if (info.Length() > 2) {
     return ThrowError(
       "Usage: bitcoind.isSpent(txid, outputIndex)");
@@ -1324,6 +1361,7 @@ NAN_METHOD(IsSpent) {
  * - the previous hash of the block
  */
 NAN_METHOD(GetBlockIndex) {
+LOG_FN();
   Isolate* isolate = Isolate::GetCurrent();
   HandleScope scope(isolate);
 
@@ -1377,6 +1415,7 @@ NAN_METHOD(GetBlockIndex) {
  * @returns {boolean} - True if the block is in the main chain. False if it is an orphan.
  */
 NAN_METHOD(IsMainChain) {
+LOG_FN();
   Isolate* isolate = Isolate::GetCurrent();
   HandleScope scope(isolate);
 
@@ -1405,6 +1444,7 @@ NAN_METHOD(IsMainChain) {
  */
 
 NAN_METHOD(GetInfo) {
+LOG_FN();
   if (info.Length() > 0) {
     return ThrowError(
       "Usage: bitcoind.getInfo()");
@@ -1435,6 +1475,7 @@ NAN_METHOD(GetInfo) {
  */
 
 NAN_METHOD(EstimateFee) {
+LOG_FN();
   Isolate* isolate = Isolate::GetCurrent();
   HandleScope scope(isolate);
 
@@ -1464,6 +1505,7 @@ NAN_METHOD(EstimateFee) {
  * @param {boolean} - Skip absurdly high fee checks
  */
 NAN_METHOD(SendTransaction) {
+LOG_FN();
   Isolate* isolate = Isolate::GetCurrent();
   HandleScope scope(isolate);
 
@@ -1519,6 +1561,7 @@ NAN_METHOD(SendTransaction) {
  * Will return an array of transaction buffers.
  */
 NAN_METHOD(GetMempoolTransactions) {
+LOG_FN();
   Isolate* isolate = info.GetIsolate();
   HandleScope scope(isolate);
 
@@ -1553,6 +1596,7 @@ NAN_METHOD(GetMempoolTransactions) {
   * AddMempoolUncheckedTransaction
   */
 NAN_METHOD(AddMempoolUncheckedTransaction) {
+LOG_FN();
   v8::String::Utf8Value param1(info[0]->ToString());
   std::string *input = new std::string(*param1);
 
@@ -1571,11 +1615,12 @@ NAN_METHOD(AddMempoolUncheckedTransaction) {
 
 static bool
 set_cooked(void) {
+LOG_FN();
   uv_tty_t tty;
   tty.mode = 1;
   tty.orig_termios = orig_termios;
 
-  if (!uv_tty_set_mode(&tty, 0)) {
+  if (!uv_tty_set_mode(&tty, 0)||1) {
     printf("\x1b[H\x1b[J");
     return true;
   }
@@ -1588,6 +1633,7 @@ set_cooked(void) {
  * Initialize the singleton object known as bitcoind.
  */
 NAN_MODULE_INIT(init) {
+LOG_FN();
   Nan::Set(target, New("start").ToLocalChecked(), GetFunction(New<FunctionTemplate>(StartBitcoind)).ToLocalChecked());
   Nan::Set(target, New("onBlocksReady").ToLocalChecked(), GetFunction(New<FunctionTemplate>(OnBlocksReady)).ToLocalChecked());
   Nan::Set(target, New("onTipUpdate").ToLocalChecked(), GetFunction(New<FunctionTemplate>(OnTipUpdate)).ToLocalChecked());
